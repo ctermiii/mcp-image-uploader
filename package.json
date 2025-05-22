@@ -1,0 +1,39 @@
+{
+  "name": "mcp-image-uploader-server",
+  "version": "0.1.4",
+  "description": "MCP server to download an image from a URL via wget, convert WebP to JPEG if needed, and upload it to a pre-configured image host via curl.",
+  "main": "dist/mcp_image_server.js",
+  "type": "module",
+  "bin": {
+    "mcp-image-uploader": "dist/mcp_image_server.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/mcp_image_server.js",
+    "dev": "ts-node mcp_image_server.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "image-uploader",
+    "wget",
+    "curl",
+    "imagemagick",
+    "convert"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+

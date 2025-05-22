@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", // Target modern ECMAScript version
+    "module": "NodeNext", // Use Node.js's native ES module support
+    "moduleResolution": "NodeNext", // How modules get resolved
+    "outDir": "./dist", // Output directory for compiled JavaScript
+    "rootDir": "./", // Root directory of source files (assuming mcp_image_server.ts is in root)
+    "strict": true, // Enable all strict type-checking options
+    "esModuleInterop": true, // Enables compatibility with CommonJS modules
+    "resolveJsonModule": true, // Allows importing JSON files
+    "skipLibCheck": true, // Skip type checking of declaration files (speeds up compilation)
+    "forceConsistentCasingInFileNames": true, // Disallow inconsistently-cased references to the same file
+    "declaration": true, // Generate corresponding '.d.ts' file
+    "sourceMap": true, // Generate corresponding '.map' file
+    "allowSyntheticDefaultImports": true, // Allow default imports from modules with no default export
+    "experimentalDecorators": true, // Enables experimental support for ES7 decorators
+    "emitDecoratorMetadata": true // Enables experimental support for emitting type metadata for decorators
+  },
+  "include": [
+    "mcp_image_server.ts" // Or "*.ts" if you have multiple .ts files in the root
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
+}
