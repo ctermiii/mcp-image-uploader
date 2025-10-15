@@ -5,14 +5,16 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
-  // ToolResponse, // Removed as it's not exported from types.js
 } from "@modelcontextprotocol/sdk/types.js";
 import { exec as callbackExec } from "child_process";
 import util from "util";
 import fs from "fs/promises";
+import { createWriteStream } from "fs";
 import path from "path";
 import os from "os";
 import crypto from "crypto";
+import https from "https";
+import http from "http";
 
 const exec = util.promisify(callbackExec);
 
@@ -29,6 +31,112 @@ if (!IMAGE_UPLOAD_URL) {
 }
 
 
+// Helper function to download file using native Node.js modules (replaces wget)
+// 使用Node.js原生模块下载文件 (替代wget)
+async function downloadFile(url: string, destPath: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const protocol = url.startsWith('https') ? https : http;
+
+    const request = protocol.get(url, { timeout: 15000 }, (response) => {
+      // Handle redirects
+      if (response.statusCode === 301 || response.statusCode === 302) {
+        const redirectUrl = response.headers.location;
+        if (redirectUrl) {
+          downloadFile(redirectUrl, destPath).then(resolve).catch(reject);
+          return;
+        }
+      }
+
+      if (response.statusCode !== 200) {
+        reject(new Error(`Failed to download: HTTP ${response.statusCode}`));
+        return;
+      }
+
+      const fileStream = createWriteStream(destPath);
+      response.pipe(fileStream);
+
+      fileStream.on('finish', () => {
+        fileStream.close();
+        resolve();
+      });
+
+      fileStream.on('error', (err: Error) => {
+        fs.unlink(destPath).catch(() => {});
+        reject(err);
+      });
+    });
+
+    request.on('error', reject);
+    request.on('timeout', () => {
+      request.destroy();
+      reject(new Error('Download timeout'));
+    });
+  });
+}
+
+// Helper function to upload file using native Node.js modules (replaces curl)
+// 使用Node.js原生模块上传文件 (替代curl)
+async function uploadFile(filePath: string, uploadUrl: string): Promise<string> {
+  return new Promise(async (resolve, reject) => {
+    try {
+      const fileBuffer = await fs.readFile(filePath);
+      const filename = path.basename(filePath);
+      const boundary = `----WebKitFormBoundary${crypto.randomBytes(16).toString('hex')}`;
+
+      const payload: Buffer[] = [];
+      payload.push(Buffer.from(`--${boundary}\r\n`));
+      payload.push(Buffer.from(`Content-Disposition: form-data; name="file"; filename="${filename}"\r\n`));
+      payload.push(Buffer.from(`Content-Type: application/octet-stream\r\n\r\n`));
+      payload.push(fileBuffer);
+      payload.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+
+      const body = Buffer.concat(payload);
+      const urlObj = new URL(uploadUrl);
+      const protocol = urlObj.protocol === 'https:' ? https : http;
+
+      const options = {
+        hostname: urlObj.hostname,
+        port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+        path: urlObj.pathname + urlObj.search,
+        method: 'POST',
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': body.length,
+          'Accept': 'application/json',
+        },
+        timeout: 30000,
+      };
+
+      const request = protocol.request(options, (response) => {
+        let data = '';
+
+        response.on('data', (chunk) => {
+          data += chunk;
+        });
+
+        response.on('end', () => {
+          if (response.statusCode && response.statusCode >= 200 && response.statusCode < 300) {
+            resolve(data);
+          } else {
+            reject(new Error(`Upload failed: HTTP ${response.statusCode} - ${data}`));
+          }
+        });
+      });
+
+      request.on('error', reject);
+      request.on('timeout', () => {
+        request.destroy();
+        reject(new Error('Upload timeout'));
+      });
+
+      request.write(body);
+      request.end();
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
 // Helper function to get file extension from a URL or a filename
 // 获取文件扩展名的辅助函数 (可用于URL或文件名)
 function getFileExtension(inputString: string): string {
@@ -40,16 +148,16 @@ function getFileExtension(inputString: string): string {
   } catch (e) {
     // Not a valid URL, assume it's a filename or path
   }
-  
-  const ext = path.extname(filenameOrPath).toLowerCase(); // Convert to lowercase for consistent checking
-  return ext || ".tmp"; // Default to .tmp if no extension found
+
+  const ext = path.extname(filenameOrPath).toLowerCase();
+  return ext || ".tmp";
 }
 
 
 const server = new Server(
   {
     name: "image-uploader-mcp-server",
-    version: "0.1.4", // 版本更新
+    version: "0.2.0",
   },
   {
     capabilities: {
@@ -64,21 +172,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: "upload_image_from_url",
         description:
-          `Downloads an image from a given URL using wget. If the downloaded image is in WebP format, it's converted to JPEG using the 'convert' command. The (potentially converted) image is then uploaded to a pre-configured image hosting service (defined by IMAGE_UPLOAD_URL environment variable) using curl. Returns the hosting service's response, attempting to parse and return the full image URL. No API token is used. Requires 'wget', 'curl', and 'convert' (ImageMagick) to be installed.`, // 工具描述更新
+          `Downloads an image from a given URL using native Node.js modules (no wget required). If the downloaded image is in WebP format, it's converted to JPEG using the 'convert' command (ImageMagick). The (potentially converted) image is then uploaded to a pre-configured image hosting service (defined by IMAGE_UPLOAD_URL environment variable) using native Node.js modules (no curl required). Returns the hosting service's response, attempting to parse and return the full image URL. Only requires 'convert' (ImageMagick) to be installed if WebP conversion is needed.`,
         inputSchema: {
           type: "object",
           properties: {
             image_url: {
               type: "string",
-              description: "The URL of the image to download and upload.", 
+              description: "The URL of the image to download and upload.",
             },
             filename_prefix: {
               type: "string",
-              description: "(Optional) A prefix for the temporary filename. A random string will be appended.", 
+              description: "(Optional) A prefix for the temporary filename. A random string will be appended.",
               default: "mcp_upload_",
             }
           },
-          required: ["image_url"], 
+          required: ["image_url"],
         },
         outputSchema: {
           type: "object",
@@ -132,13 +240,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request): Promise<any> =>
     let convertedImagePath: string | undefined = undefined;
 
 
-    console.error(`Attempting to download: ${image_url} to ${localImagePath}`); 
+    console.error(`Attempting to download: ${image_url} to ${localImagePath}`);
 
     try {
-      // 1. Download the image using wget
-      const wgetCommand = `wget --tries=3 --timeout=15 -O "${localImagePath}" "${image_url}"`;
-      console.error(`Executing wget: ${wgetCommand}`); 
-      await exec(wgetCommand);
+      // 1. Download the image using native Node.js modules (replaces wget)
+      console.error(`Downloading from: ${image_url}`);
+      await downloadFile(image_url, localImagePath);
       console.error(`Image downloaded successfully: ${localImagePath}`); 
 
       // Check if the downloaded file is WebP by its extension
@@ -158,88 +265,90 @@ server.setRequestHandler(CallToolRequestSchema, async (request): Promise<any> =>
         finalImagePathForUpload = localImagePath; // Upload the original if not WebP
       }
 
-      // 2. Upload the image (original or converted) using curl
-      let curlCommand = `curl -s -X POST -F "file=@${finalImagePathForUpload}"`;
-      curlCommand += ` -H "Accept: application/json"`;
-      curlCommand += ` "${upload_url_from_env}"`; 
-
-      console.error(`Executing curl: ${curlCommand}`); 
-      const { stdout: curlStdout, stderr: curlStderr } = await exec(curlCommand);
-
-      if (curlStderr) {
-        console.error(`Curl stderr: ${curlStderr}`); 
-      }
+      // 2. Upload the image (original or converted) using native Node.js modules (replaces curl)
+      console.error(`Uploading image from: ${finalImagePathForUpload}`);
+      const curlStdout = await uploadFile(finalImagePathForUpload, upload_url_from_env);
       console.error(`Image uploaded. Raw response: ${curlStdout}`); 
-      
+
       let uploadedImageUrl: string | undefined = undefined;
       let parsedSuccessfully = false;
 
       try {
         const jsonResponse = JSON.parse(curlStdout);
 
-        if (jsonResponse && jsonResponse.status === true && jsonResponse.data && jsonResponse.data.links && jsonResponse.data.links.url) {
-            uploadedImageUrl = jsonResponse.data.links.url;
-            parsedSuccessfully = true;
-            console.error(`Parsed Lsky Pro (full URL) uploaded image URL: ${uploadedImageUrl}`); 
-        } 
-        else if (Array.isArray(jsonResponse) && jsonResponse.length > 0 && jsonResponse[0] && typeof jsonResponse[0].src === 'string') {
-            const relativeSrc = jsonResponse[0].src;
-            const baseUrl = new URL(upload_url_from_env).origin; 
-            uploadedImageUrl = new URL(relativeSrc, baseUrl).href;
-            parsedSuccessfully = true;
-            console.error(`Parsed relative 'src' and constructed full URL: ${uploadedImageUrl}`); 
+        // Try different common response formats
+        if (jsonResponse?.status === true && jsonResponse?.data?.links?.url) {
+          // Lsky Pro format
+          uploadedImageUrl = jsonResponse.data.links.url;
+          parsedSuccessfully = true;
+          console.error(`Parsed Lsky Pro format URL: ${uploadedImageUrl}`);
+        } else if (Array.isArray(jsonResponse) && jsonResponse.length > 0 && jsonResponse[0]?.src) {
+          // Array format with relative src
+          const relativeSrc = jsonResponse[0].src;
+          const baseUrl = new URL(upload_url_from_env).origin;
+          uploadedImageUrl = new URL(relativeSrc, baseUrl).href;
+          parsedSuccessfully = true;
+          console.error(`Parsed array format URL: ${uploadedImageUrl}`);
+        } else if (jsonResponse?.data?.url) {
+          // Generic data.url format
+          let tempUrl = jsonResponse.data.url;
+          if (tempUrl && !tempUrl.startsWith('http://') && !tempUrl.startsWith('https://')) {
+            const baseUrl = new URL(upload_url_from_env).origin;
+            uploadedImageUrl = new URL(tempUrl, baseUrl).href;
+          } else {
+            uploadedImageUrl = tempUrl;
+          }
+          parsedSuccessfully = true;
+          console.error(`Parsed generic data.url format: ${uploadedImageUrl}`);
+        } else if (jsonResponse?.url) {
+          // Direct url field
+          uploadedImageUrl = jsonResponse.url;
+          parsedSuccessfully = true;
+          console.error(`Parsed direct url format: ${uploadedImageUrl}`);
         }
-        else if (jsonResponse && jsonResponse.data && typeof jsonResponse.data.url === 'string') {
-            let tempUrl = jsonResponse.data.url as string; 
-            if (tempUrl && !tempUrl.startsWith('http://') && !tempUrl.startsWith('https://')) {
-                const baseUrl = new URL(upload_url_from_env).origin;
-                uploadedImageUrl = new URL(tempUrl, baseUrl).href;
-            } else {
-                uploadedImageUrl = tempUrl;
-            }
-            parsedSuccessfully = true;
-            console.error(`Parsed 'data.url' structure. Final URL: ${uploadedImageUrl}`); 
-        }
-
       } catch (parseError) {
-        console.error("Could not parse JSON response from image host, or expected fields not found. Raw response will be returned."); 
+        console.error(`Could not parse JSON response: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
       }
 
       if (!parsedSuccessfully) {
-          console.warn("Failed to parse a known successful structure from the image host response. The raw response is available."); 
+        console.warn("Failed to parse image URL from response. Raw response is available.");
       }
 
       return {
         content: [
           {
             type: "text",
-            text: `Upload attempt finished. Raw response: ${curlStdout}` + (uploadedImageUrl ? ` Constructed/Parsed Image URL: ${uploadedImageUrl}` : " Could not determine final image URL from response."), 
+            text: uploadedImageUrl
+              ? `Upload successful. Image URL: ${uploadedImageUrl}`
+              : `Upload completed but could not parse image URL. Raw response: ${curlStdout}`,
           },
         ],
-        toolMetadata: { 
-            raw_response: curlStdout,
-            uploaded_image_url: uploadedImageUrl,
-            status: uploadedImageUrl ? "success" : "partial_success_unknown_url",
-            converted_to_jpeg: !!convertedImagePath // Indicate if conversion happened
+        toolMetadata: {
+          raw_response: curlStdout,
+          uploaded_image_url: uploadedImageUrl,
+          status: uploadedImageUrl ? "success" : "partial_success_unknown_url",
+          converted_to_jpeg: !!convertedImagePath,
         }
       };
     } catch (error: any) {
-      console.error(`Error during image processing: ${error.message}`); 
-      console.error(`Stdout: ${error.stdout}`); 
-      console.error(`Stderr: ${error.stderr}`); 
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`Error during image processing: ${errorMessage}`);
+      if (error.stdout) console.error(`Stdout: ${error.stdout}`);
+      if (error.stderr) console.error(`Stderr: ${error.stderr}`);
+
       return {
         content: [
           {
             type: "text",
-            text: `Error processing image: ${error.message}. Stderr: ${error.stderr || 'N/A'}. Stdout: ${error.stdout || 'N/A'}`, 
+            text: `Error processing image: ${errorMessage}${error.stderr ? `\nDetails: ${error.stderr}` : ''}`,
           },
         ],
         isError: true,
         toolMetadata: {
-            error_details: error.message,
-            stderr: error.stderr,
-            stdout: error.stdout,
-            status: "failure"
+          error_details: errorMessage,
+          stderr: error.stderr || null,
+          stdout: error.stdout || null,
+          status: "failure"
         }
       };
     } finally {
@@ -248,19 +357,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request): Promise<any> =>
       if (convertedImagePath) {
         filesToDelete.push(convertedImagePath);
       }
-      for (const filePath of filesToDelete) {
-          if (filePath) { // Ensure filePath is defined
+
+      await Promise.all(
+        filesToDelete.map(async (filePath) => {
+          if (filePath) {
             try {
-                await fs.access(filePath); 
-                await fs.unlink(filePath);
-                console.error(`Temporary file deleted: ${filePath}`); 
+              await fs.access(filePath);
+              await fs.unlink(filePath);
+              console.error(`Temporary file deleted: ${filePath}`);
             } catch (cleanupError) {
-                if ((cleanupError as NodeJS.ErrnoException).code !== 'ENOENT') { // Don't log error if file simply doesn't exist
-                    console.error(`Error deleting temporary file ${filePath}: ${cleanupError}`); 
-                }
+              if ((cleanupError as NodeJS.ErrnoException).code !== 'ENOENT') {
+                console.error(`Error deleting temporary file ${filePath}: ${cleanupError}`);
+              }
             }
           }
-      }
+        })
+      );
     }
   }
 
@@ -274,10 +386,10 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error(
-    "MCP Image Uploader Server (wget & curl) v0.1.4 running on stdio. Waiting for requests..." 
+    "MCP Image Uploader Server v0.2.0 running on stdio. Waiting for requests..."
   );
-  console.error(`Using image upload URL from environment: ${IMAGE_UPLOAD_URL}`); 
-  console.warn("This server requires 'wget', 'curl', and 'convert' (ImageMagick) to be installed and accessible in the system's PATH.");
+  console.error(`Using image upload URL from environment: ${IMAGE_UPLOAD_URL}`);
+  console.warn("Note: Only 'convert' (ImageMagick) is required for WebP conversion. wget and curl are no longer needed.");
 }
 
 main().catch((error) => {
